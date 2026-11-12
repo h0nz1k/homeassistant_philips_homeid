@@ -108,7 +108,13 @@
       "init": {
         "data": {
           "scan_interval": "Polling interval (seconds)",
-          "active_scan_interval": "Active polling interval while cooking (seconds)"
+          "active_scan_interval": "Active polling interval while cooking (seconds)",
+          "experimental_fusion_autocook": "Experimental: start AutoCook programs over the cloud (FUSION, acp_c)",
+          "fusion_autocook_variant": "Experimental: acp_c payload variant",
+          "fusion_autocook_start_after": "Experimental: send Start after the AutoCook program is set"
+        },
+        "data_description": {
+          "experimental_fusion_autocook": "Untested. Writes the AutoCook program to the acp_c port of a FUSION Venus airfryer. The AutoCook select and send button only appear when the appliance advertises acp_c. Enables the philips_homeid.autocook_probe developer action."
         }
       }
     }
@@ -742,6 +748,55 @@
     "fan": {
       "air_purifier": {
         "name": "Air Purifier"
+      }
+    }
+  },
+  "selector": {
+    "fusion_autocook_variant": {
+      "options": {
+        "uuid_only": "UUID only",
+        "uuid_amount": "UUID + amount (u1)",
+        "uuid_amount_doneness": "UUID + amount (u1) + doneness"
+      }
+    }
+  },
+  "services": {
+    "autocook_probe": {
+      "name": "AutoCook probe (experimental)",
+      "description": "Developer action: writes one AutoCook program to the acp_c port of a FUSION airfryer, logs the request and the appliance's reply, and stops any cook it starts after a few seconds. Needs the experimental FUSION AutoCook option.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Device",
+          "description": "The Philips HomeID entry to probe. Optional when only one entry has the experimental option on."
+        },
+        "uuid": {
+          "name": "Program UUID",
+          "description": "Built-in AutoCook program id, as reported by the AutoCook program sensor (e.g. 14)."
+        },
+        "variant": {
+          "name": "Payload variant",
+          "description": "Which properties to write next to the UUID."
+        },
+        "amount": {
+          "name": "Amount",
+          "description": "Basket fill level (u1), for the variants that send it."
+        },
+        "doneness": {
+          "name": "Doneness",
+          "description": "Doneness, for the variant that sends it."
+        },
+        "start_after": {
+          "name": "Start after",
+          "description": "Also send status cooking on the Control port after the write."
+        },
+        "stop_after_seconds": {
+          "name": "Stop after",
+          "description": "Seconds after the appliance starts cooking before the probe stops it."
+        },
+        "watch_seconds": {
+          "name": "Watch for",
+          "description": "Seconds the probe waits for a cook to begin."
+        }
       }
     }
   }

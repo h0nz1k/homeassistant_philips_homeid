@@ -467,6 +467,12 @@ The integration automatically detects FUSION devices during setup. When a device
 - A "My Presets" select lists them by name; picking one applies its saved temperature and time and puts the device in the setting state, then press Start to cook (same flow as the built-in cooking method)
 - Supported on SPECTRE airfryers; the apply matches the Philips app's preset command for both cloud (FUSION) and local devices
 
+**Experimental: built-in AutoCook programs on FUSION Venus air fryers (untested):**
+- Off by default. Turn on "Experimental: start AutoCook programs over the cloud" in the integration's options (FUSION entries only)
+- The NCP port list is logged once at INFO (`NCP getAllPorts for <model>: read=[...] write=[...]`), which shows whether the appliance offers the `acp_c` AutoCook write port
+- With the option on and `acp_c` advertised, the AutoCook Program select and Send AutoCook Program button are created. Sending wakes a Venus in standby to the main menu, writes the program to `acp_c` in the chosen payload variant (`uuid_only`, `uuid_amount` with the basket amount `u1`, or `uuid_amount_doneness`) and, if "send Start" is on, follows it with `status: cooking` on the Control port. Nothing is written while the drawer is out
+- The `philips_homeid.autocook_probe` developer action writes one program, logs the request and the appliance's whole reply (URLs and credentials redacted) and returns them as the action response. If the appliance starts cooking, the probe stops it `stop_after_seconds` (default 20) later with the regular Stop, not power off
+
 **Limitations:**
 - Requires internet connectivity (cloud-dependent)
 - Token refresh happens automatically but requires a valid refresh token

@@ -1,0 +1,58 @@
+autocook_probe:
+  fields:
+    config_entry_id:
+      required: false
+      selector:
+        config_entry:
+          integration: philips_homeid
+    uuid:
+      required: true
+      example: "14"
+      selector:
+        text:
+    variant:
+      required: false
+      default: uuid_only
+      selector:
+        select:
+          options:
+            - uuid_only
+            - uuid_amount
+            - uuid_amount_doneness
+    amount:
+      required: false
+      selector:
+        number:
+          min: 1
+          max: 7
+          mode: box
+    doneness:
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 10
+          mode: box
+    start_after:
+      required: false
+      default: false
+      selector:
+        boolean:
+    stop_after_seconds:
+      required: false
+      default: 20
+      selector:
+        number:
+          min: 0
+          max: 300
+          unit_of_measurement: s
+          mode: box
+    watch_seconds:
+      required: false
+      default: 60
+      selector:
+        number:
+          min: 10
+          max: 600
+          unit_of_measurement: s
+          mode: box

@@ -2,6 +2,52 @@
 
 from __future__ import annotations
 
+import re
+from typing import Any
+
+# Keys whose values must never reach a log: the acp_s presigned program URL
+# and anything credential shaped.
+_REDACT_KEYS = frozenset(
+    {
+        "url",
+        "token",
+        "access_token",
+        "refresh_token",
+        "id_token",
+        "signature",
+        "password",
+        "secret",
+        "client_secret",
+        "authorization",
+    }
+)
+_URL_RE = re.compile(r"https?://\S+")
+REDACTED = "**REDACTED**"
+
+
+def redact_for_log(value: Any) -> Any:
+    """Copy a device message with URLs and credentials replaced.
+
+    Used for the experimental AutoCook probe, which logs whole replies: an
+    acp_s report carries a presigned download URL, and a URL in any other
+    field is treated the same way.
+    """
+    if isinstance(value, dict):
+        return {
+            key: (
+                REDACTED
+                if isinstance(key, str)
+                and (key.lower() in _REDACT_KEYS or "token" in key.lower())
+                else redact_for_log(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list | tuple):
+        return [redact_for_log(item) for item in value]
+    if isinstance(value, str):
+        return _URL_RE.sub(REDACTED, value)
+    return value
+
 
 def normalize_unique_id(raw_id: str) -> str:
     """Normalize a device identifier to a consistent format.

@@ -102,6 +102,33 @@ SSDP_ST = "urn:philips-com:device:DiProduct:1"
 CONF_SCAN_INTERVAL = "scan_interval"
 CONF_ACTIVE_SCAN_INTERVAL = "active_scan_interval"
 
+# Experimental: start built-in AutoCook programs on a FUSION Venus airfryer by
+# writing the acp_c port. Off by default; the acp_c schema is unverified.
+CONF_EXPERIMENTAL_FUSION_AUTOCOOK = "experimental_fusion_autocook"
+CONF_FUSION_AUTOCOOK_VARIANT = "fusion_autocook_variant"
+CONF_FUSION_AUTOCOOK_START_AFTER = "fusion_autocook_start_after"
+# acp_c payload shapes to try: the UUID alone (as the local PUT sends), plus
+# the basket amount (acp_s u1), plus doneness.
+AUTOCOOK_VARIANT_UUID_ONLY = "uuid_only"
+AUTOCOOK_VARIANT_UUID_AMOUNT = "uuid_amount"
+AUTOCOOK_VARIANT_UUID_AMOUNT_DONENESS = "uuid_amount_doneness"
+AUTOCOOK_VARIANTS = (
+    AUTOCOOK_VARIANT_UUID_ONLY,
+    AUTOCOOK_VARIANT_UUID_AMOUNT,
+    AUTOCOOK_VARIANT_UUID_AMOUNT_DONENESS,
+)
+DEFAULT_FUSION_AUTOCOOK_VARIANT = AUTOCOOK_VARIANT_UUID_ONLY
+DEFAULT_AUTOCOOK_AMOUNT = 1
+DEFAULT_AUTOCOOK_DONENESS = 0
+# NCP write port the experimental FUSION AutoCook start uses.
+NCP_AUTOCOOK_CONTROL_PORT = "acp_c"
+# Developer service that writes acp_c once and logs the appliance's answer.
+SERVICE_AUTOCOOK_PROBE = "autocook_probe"
+# A probe that makes the appliance cook is stopped this many seconds later.
+DEFAULT_PROBE_STOP_AFTER = 20
+# How long a probe watches for a cook to begin before it stops watching.
+DEFAULT_PROBE_WATCH = 60
+
 # Keep warm temperature the appliances default to, in Celsius. The keep warm
 # number entity bounds are written in Celsius for the same reason: that is how
 # the appliances are specified, and a Fahrenheit model accepts the same

@@ -35,6 +35,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.typing import ConfigType
 
 from .const import (
     CONF_AIRFRYER_PORT,
@@ -61,6 +62,7 @@ from .const import (
 from .coordinator import PhilipsHomeIDCoordinator
 from .local_api import LocalDeviceInfo, PhilipsLocalAPI
 from .mqtt_api import FusionDeviceInfo, MqttCredentialsRejected, PhilipsMQTTClient
+from .services import async_setup_services
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -76,6 +78,12 @@ PLATFORMS: list[Platform] = [
     Platform.SWITCH,
     Platform.UPDATE,
 ]
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Register the integration's actions once, before any entry loads."""
+    async_setup_services(hass)
+    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

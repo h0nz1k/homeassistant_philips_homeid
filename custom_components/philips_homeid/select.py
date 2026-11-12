@@ -142,10 +142,14 @@ async def async_setup_entry(
                     PhilipsHomeIDMyPresetSelect(coordinator, coordinator.device_id)
                 )
                 created_keys.add("my_preset")
-            if (
-                "autocook_program" not in created_keys
-                and coordinator.mqtt_client is None
-                and coordinator.has_property("autocook")
+            if "autocook_program" not in created_keys and (
+                (
+                    coordinator.mqtt_client is None
+                    and coordinator.has_property("autocook")
+                )
+                # Experimental FUSION start over acp_c. acp_s reports nothing
+                # while no program runs, so it is not waited for here.
+                or coordinator.fusion_autocook_available()
             ):
                 entities.append(
                     PhilipsHomeIDAutoCookProgramSelect(
@@ -358,7 +362,10 @@ class PhilipsHomeIDRitaRoastLevelSelect(PhilipsHomeIDEntity, SelectEntity):
 
 
 class PhilipsHomeIDAutoCookProgramSelect(PhilipsHomeIDEntity, SelectEntity):
-    """Built-in AutoCook program selector for Venus local-HTTP airfryers."""
+    """Built-in AutoCook program selector for Venus airfryers.
+
+    Local HTTP, or FUSION with the experimental acp_c start enabled.
+    """
 
     _attr_translation_key = "autocook_program"
     _attr_icon = "mdi:chef-hat"

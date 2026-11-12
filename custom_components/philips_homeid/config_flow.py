@@ -37,6 +37,9 @@ from homeassistant.config_entries import ConfigFlowResult
 from homeassistant.const import CONF_HOST
 from homeassistant.core import callback
 from homeassistant.helpers.selector import (
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
     TextSelector,
     TextSelectorConfig,
     TextSelectorType,
@@ -53,6 +56,7 @@ from .cloud_api import (
 )
 from .const import (
     ACTIVE_SCAN_INTERVAL,
+    AUTOCOOK_VARIANTS,
     CONF_ACTIVE_SCAN_INTERVAL,
     CONF_CLIENT_ID,
     CONF_CLIENT_SECRET,
@@ -60,6 +64,9 @@ from .const import (
     CONF_CPP_ID,
     CONF_DEVICE_ID,
     CONF_ENCRYPTION_KEY,
+    CONF_EXPERIMENTAL_FUSION_AUTOCOOK,
+    CONF_FUSION_AUTOCOOK_START_AFTER,
+    CONF_FUSION_AUTOCOOK_VARIANT,
     CONF_IS_FUSION,
     CONF_MODEL,
     CONF_MQTT_HOST,
@@ -69,6 +76,7 @@ from .const import (
     CONF_TENANT,
     CONF_THING_NAME,
     CONF_USE_HTTPS,
+    DEFAULT_FUSION_AUTOCOOK_VARIANT,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
     FUSION_MQTT_HOST,
@@ -1318,20 +1326,46 @@ class PhilipsHomeIDOptionsFlow(config_entries.OptionsFlow):
             return self.async_create_entry(title="", data=user_input)
 
         options = self.config_entry.options
-        return self.async_show_form(
-            step_id="init",
-            data_schema=vol.Schema(
-                {
-                    vol.Optional(
-                        CONF_SCAN_INTERVAL,
-                        default=options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
-                    ): vol.All(vol.Coerce(int), vol.Range(min=10, max=300)),
-                    vol.Optional(
-                        CONF_ACTIVE_SCAN_INTERVAL,
-                        default=options.get(
-                            CONF_ACTIVE_SCAN_INTERVAL, ACTIVE_SCAN_INTERVAL
-                        ),
-                    ): vol.All(vol.Coerce(int), vol.Range(min=5, max=60)),
-                }
+        schema: dict[Any, Any] = {
+            vol.Optional(
+                CONF_SCAN_INTERVAL,
+                default=options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
+            ): vol.All(vol.Coerce(int), vol.Range(min=10, max=300)),
+            vol.Optional(
+                CONF_ACTIVE_SCAN_INTERVAL,
+                default=options.get(CONF_ACTIVE_SCAN_INTERVAL, ACTIVE_SCAN_INTERVAL),
+            ): vol.All(vol.Coerce(int), vol.Range(min=5, max=60)),
+        }
+        if self.config_entry.data.get(CONF_IS_FUSION):
+            schema.update(_experimental_fusion_autocook_schema(options))
+        return self.async_show_form(step_id="init", data_schema=vol.Schema(schema))
+
+
+def _experimental_fusion_autocook_schema(options: Mapping[str, Any]) -> dict[Any, Any]:
+    """Return the options of the experimental FUSION AutoCook start.
+
+    Only offered on FUSION entries; local Venus airfryers already start
+    AutoCook programs over HTTP.
+    """
+    return {
+        vol.Optional(
+            CONF_EXPERIMENTAL_FUSION_AUTOCOOK,
+            default=options.get(CONF_EXPERIMENTAL_FUSION_AUTOCOOK, False),
+        ): bool,
+        vol.Optional(
+            CONF_FUSION_AUTOCOOK_VARIANT,
+            default=options.get(
+                CONF_FUSION_AUTOCOOK_VARIANT, DEFAULT_FUSION_AUTOCOOK_VARIANT
             ),
-        )
+        ): SelectSelector(
+            SelectSelectorConfig(
+                options=list(AUTOCOOK_VARIANTS),
+                mode=SelectSelectorMode.DROPDOWN,
+                translation_key=CONF_FUSION_AUTOCOOK_VARIANT,
+            )
+        ),
+        vol.Optional(
+            CONF_FUSION_AUTOCOOK_START_AFTER,
+            default=options.get(CONF_FUSION_AUTOCOOK_START_AFTER, False),
+        ): bool,
+    }

@@ -56,6 +56,9 @@ class PhilipsHomeIDButtonEntityDescription(ButtonEntityDescription):
     cloud_only: bool = False  # Only show for cloud-authenticated devices
     local_only: bool = False  # Only show for local-HTTP devices (not FUSION)
     venus_only: bool = False  # Only show for Venus-style ports (autocook-capable)
+    # Only show where the experimental FUSION AutoCook start is on and the
+    # appliance advertises acp_c (see coordinator.fusion_autocook_available)
+    fusion_autocook: bool = False
 
 
 # Rita espresso machine buttons (APK RitaControlCommand)
@@ -155,6 +158,16 @@ AIRFRYER_BUTTONS: tuple[PhilipsHomeIDButtonEntityDescription, ...] = (
         local_only=True,
         venus_only=True,
     ),
+    # The same button on FUSION, experimental. acp_s answers empty while no
+    # program runs, so availability follows the airfryer port instead.
+    PhilipsHomeIDButtonEntityDescription(
+        key="airfryer_autocook_send",
+        translation_key="airfryer_autocook_send",
+        icon="mdi:send",
+        press_fn=lambda c: c.async_autocook_send(),
+        available_key="airfryer",
+        fusion_autocook=True,
+    ),
 )
 
 
@@ -250,6 +263,11 @@ async def async_setup_entry(
             if description.local_only and coordinator.mqtt_client is not None:
                 continue
             if description.venus_only and airfryer_port not in VENUS_STYLE_PORTS:
+                continue
+            if (
+                description.fusion_autocook
+                and not coordinator.fusion_autocook_available()
+            ):
                 continue
             entities.append(
                 PhilipsHomeIDButton(coordinator, description, coordinator.device_id)

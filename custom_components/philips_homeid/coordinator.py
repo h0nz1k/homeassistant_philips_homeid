@@ -42,6 +42,9 @@ from homeassistant.util.unit_conversion import TemperatureConverter
 
 from .const import (
     ACTIVE_SCAN_INTERVAL,
+    AUTOCOOK_VARIANT_UUID_AMOUNT,
+    AUTOCOOK_VARIANT_UUID_AMOUNT_DONENESS,
+    AUTOCOOK_VARIANT_UUID_ONLY,
     CLOUD_FETCH_RETRY_DELAY,
     CONF_ACTIVE_SCAN_INTERVAL,
     CONF_APPLIANCE_ID,
@@ -49,6 +52,9 @@ from .const import (
     CONF_CLOUD_REFRESH_TOKEN,
     CONF_CPP_ID,
     CONF_DEVICE_ID,
+    CONF_EXPERIMENTAL_FUSION_AUTOCOOK,
+    CONF_FUSION_AUTOCOOK_START_AFTER,
+    CONF_FUSION_AUTOCOOK_VARIANT,
     CONF_MY_PRESETS,
     CONF_MY_PRESETS_FETCHED,
     CONF_MY_PRESETS_LANGUAGE,
@@ -59,11 +65,17 @@ from .const import (
     CONF_SCAN_INTERVAL,
     CONF_TENANT,
     CONF_THING_NAME,
+    DEFAULT_AUTOCOOK_AMOUNT,
+    DEFAULT_AUTOCOOK_DONENESS,
+    DEFAULT_FUSION_AUTOCOOK_VARIANT,
+    DEFAULT_PROBE_STOP_AFTER,
+    DEFAULT_PROBE_WATCH,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
     FUSION_ACTIVE_HEARTBEAT_INTERVAL,
     FUSION_HEARTBEAT_INTERVAL,
     KEEP_WARM_DEFAULT_TEMP_C,
+    NCP_AUTOCOOK_CONTROL_PORT,
     OAUTH_CLIENT_HOMEID,
     OTA_JOBS_POLL_INTERVAL,
     OTA_UPDATE_KEY,
@@ -90,8 +102,49 @@ from .local_api import (
 )
 from .mqtt_api import PhilipsMQTTClient
 from .rita_protobuf import decode_profile_id
+from .util import redact_for_log
 
 _LOGGER = logging.getLogger(__name__)
+
+# Statuses in which an AutoCook probe counts the appliance as running a cook.
+# user_action is included: an HD9876 started with the drawer out sits there
+# and starts heating by itself once the drawer goes back in.
+_PROBE_ACTIVE_STATUSES = frozenset(
+    {
+        AIRFRYER_STATUS_COOKING,
+        AIRFRYER_STATUS_USER_ACTION,
+        AIRFRYER_STATUS_PAUSED,
+        AIRFRYER_STATUS_MAINTAIN,
+    }
+)
+# How often the probe watchdog looks at the appliance's status.
+_PROBE_POLL_INTERVAL = 0.5
+
+
+def build_autocook_payload(
+    uuid: str, variant: str, amount: int | None = None, doneness: int | None = None
+) -> dict[str, Any]:
+    """Return the acp_c properties for one experimental payload variant.
+
+    The local PUT sends only the UUID (APK ConnectKitAutoCookBridge). Whether
+    acp_c also wants the basket amount (acp_s u1) or doneness is unknown, so
+    the variants add them one at a time.
+    """
+    payload: dict[str, Any] = {"UUID": uuid}
+    if variant == AUTOCOOK_VARIANT_UUID_ONLY:
+        return payload
+    if variant not in (
+        AUTOCOOK_VARIANT_UUID_AMOUNT,
+        AUTOCOOK_VARIANT_UUID_AMOUNT_DONENESS,
+    ):
+        raise ValueError(f"Unknown AutoCook payload variant: {variant}")
+    payload["u1"] = DEFAULT_AUTOCOOK_AMOUNT if amount is None else amount
+    if variant == AUTOCOOK_VARIANT_UUID_AMOUNT_DONENESS:
+        payload["doneness"] = (
+            DEFAULT_AUTOCOOK_DONENESS if doneness is None else doneness
+        )
+    return payload
+
 
 # How long a FUSION write waits for the appliance's reply. An HD9875 answers
 # within half a second through the cloud relay; this stays well inside the
@@ -162,6 +215,8 @@ class PhilipsHomeIDCoordinator(DataUpdateCoordinator[LocalDeviceState | None]):
         self._ota_jobs_fetch_running: bool = False  # in-flight guard
         self._ota_jobs_next_fetch: float = 0.0  # monotonic gate
         self._autocook_selected_uuid: str = ""  # Venus airfryer: UUID to send next
+        # Watchdog of the running experimental AutoCook probe, if any.
+        self._autocook_probe_task: asyncio.Task[None] | None = None
         self._consecutive_failures: int = 0  # Track consecutive poll failures
         self._max_failures: int = 3  # Failures before marking device offline
         # Monotonic time of the latest NCP port-data arrival; setup waits on
@@ -643,12 +698,263 @@ class PhilipsHomeIDCoordinator(DataUpdateCoordinator[LocalDeviceState | None]):
     async def async_autocook_send(self) -> bool:
         """Send the currently selected AutoCook UUID to the device."""
         uuid = self._autocook_selected_uuid
-        if not uuid or self._is_fusion:
+        if not uuid:
             return False
+        if self._is_fusion:
+            if not self.fusion_autocook_available():
+                return False
+            options = self.config_entry.options
+            report = await self._fusion_autocook_write(
+                uuid,
+                options.get(
+                    CONF_FUSION_AUTOCOOK_VARIANT, DEFAULT_FUSION_AUTOCOOK_VARIANT
+                ),
+                amount=self._current_autocook_amount(),
+                start_after=bool(options.get(CONF_FUSION_AUTOCOOK_START_AFTER, False)),
+            )
+            return report["result"] in ("accepted", "timeout")
         result = await self.api.set_autocook_program(self.device_info, uuid)
         if result:
             await self.async_request_refresh()
         return result
+
+    # Experimental FUSION AutoCook start over acp_c.
+    #
+    # An HD9880 on FUSION advertises a write port acp_c next to acp_s (issue
+    # #14). Its schema and what the appliance does after a write are not
+    # known, so all of this is gated behind an option that is off by default,
+    # and the select and button only appear when the appliance names acp_c.
+
+    @property
+    def experimental_fusion_autocook(self) -> bool:
+        """Return whether the experimental FUSION AutoCook option is on."""
+        return bool(
+            self.config_entry.options.get(CONF_EXPERIMENTAL_FUSION_AUTOCOOK, False)
+        )
+
+    def fusion_autocook_available(self) -> bool:
+        """Return whether the experimental FUSION AutoCook start is offered."""
+        return (
+            self._is_fusion
+            and self.mqtt_client is not None
+            and self.experimental_fusion_autocook
+            and self.mqtt_client.has_write_port(NCP_AUTOCOOK_CONTROL_PORT)
+        )
+
+    def _current_autocook_amount(self) -> int | None:
+        """Return the basket amount (acp_s u1) last reported, if any."""
+        if not self._state:
+            return None
+        autocook = self._state.properties.get("autocook")
+        if not isinstance(autocook, dict):
+            return None
+        value = autocook.get("u1")
+        return value if isinstance(value, int) and value > 0 else None
+
+    def _airfryer_drawer_open(self) -> bool:
+        """Return True if the appliance reports its drawer out."""
+        if not self._state:
+            return False
+        airfryer = self._state.properties.get("airfryer")
+        if not isinstance(airfryer, dict):
+            return False
+        return bool(airfryer.get("drawer_open"))
+
+    def _autocook_snapshot(self) -> dict[str, Any]:
+        """Return the status and AutoCook fields to log, redacted."""
+        snapshot: dict[str, Any] = {"status": self._get_airfryer_status()}
+        if self._state:
+            autocook = self._state.properties.get("autocook")
+            if isinstance(autocook, dict):
+                snapshot["autocook"] = redact_for_log(autocook)
+        return snapshot
+
+    async def _fusion_autocook_write(
+        self,
+        uuid: str,
+        variant: str,
+        amount: int | None = None,
+        doneness: int | None = None,
+        start_after: bool = False,
+    ) -> dict[str, Any]:
+        """Write one AutoCook UUID to acp_c and report what came back.
+
+        Wakes a Venus in standby to mainmenu first, as the manual cook does,
+        and refuses while the drawer is out: a start pending on the drawer
+        goes ahead by itself whenever the drawer is pushed back in.
+        """
+        report: dict[str, Any] = {"uuid": uuid, "variant": variant}
+        client = self.mqtt_client
+        if not self._is_fusion or client is None:
+            report["result"] = "not_fusion"
+            return report
+        payload = build_autocook_payload(uuid, variant, amount, doneness)
+        await self._ensure_fusion_control_port()
+        report["before"] = self._autocook_snapshot()
+        if self._get_airfryer_status() == AIRFRYER_STATUS_STANDBY:
+            wake = self._fusion_wake_status
+            await self._mqtt_command("control", {"status": wake})
+            report["woke"] = await self._wait_for_status(wake, timeout=10)
+        report["write_ports"] = client.discovered_write_ports
+        if not client.has_write_port(NCP_AUTOCOOK_CONTROL_PORT):
+            _LOGGER.warning(
+                "AutoCook over FUSION: %s not advertised, write ports are %s",
+                NCP_AUTOCOOK_CONTROL_PORT,
+                report["write_ports"],
+            )
+            report["result"] = "acp_c_not_advertised"
+            return report
+        if self._airfryer_drawer_open():
+            _LOGGER.warning("AutoCook over FUSION: drawer is open, not writing")
+            report["result"] = "drawer_open"
+            return report
+
+        report["request"] = {"port": NCP_AUTOCOOK_CONTROL_PORT, "properties": payload}
+        _LOGGER.info("AutoCook over FUSION request: %s", redact_for_log(report))
+        accepted, status, name, reply = await self.hass.async_add_executor_job(
+            client.send_port_command_and_wait_reply,
+            "autocook_control",
+            "setPort",
+            payload,
+            _WRITE_REPLY_TIMEOUT,
+        )
+        report["verdict"] = name
+        report["reply"] = redact_for_log(reply)
+        _LOGGER.info(
+            "AutoCook over FUSION reply to %s: %s (%s) %s",
+            payload,
+            name,
+            status,
+            report["reply"],
+        )
+        if accepted:
+            report["result"] = "accepted"
+        elif status is None and name == "timeout":
+            # As _mqtt_command: QoS 0 replies get lost for writes that landed.
+            report["result"] = "timeout"
+        else:
+            report["result"] = "refused"
+
+        if start_after and report["result"] != "refused":
+            start = {"status": AIRFRYER_STATUS_COOKING}
+            (
+                s_accepted,
+                s_status,
+                s_name,
+                s_reply,
+            ) = await self.hass.async_add_executor_job(
+                client.send_port_command_and_wait_reply,
+                "control",
+                "setPort",
+                start,
+                _WRITE_REPLY_TIMEOUT,
+            )
+            report["start"] = {
+                "verdict": s_name,
+                "status": s_status,
+                "accepted": s_accepted,
+                "reply": redact_for_log(s_reply),
+            }
+            _LOGGER.info("AutoCook over FUSION start: %s", report["start"])
+        report["after"] = self._autocook_snapshot()
+        return report
+
+    async def async_autocook_probe(
+        self,
+        uuid: str,
+        variant: str = AUTOCOOK_VARIANT_UUID_ONLY,
+        amount: int | None = None,
+        doneness: int | None = None,
+        start_after: bool = False,
+        stop_after_seconds: float = DEFAULT_PROBE_STOP_AFTER,
+        watch_seconds: float = DEFAULT_PROBE_WATCH,
+    ) -> dict[str, Any]:
+        """Developer probe: write acp_c once, log everything, stop any cook.
+
+        Needs the experimental option. Refuses while a cook is running, so
+        every probe starts from a quiet appliance, and arms a watchdog that
+        stops a cook the probe set off stop_after_seconds after it began.
+        """
+        if not self._is_fusion or self.mqtt_client is None:
+            return {"uuid": uuid, "variant": variant, "result": "not_fusion"}
+        if not self.experimental_fusion_autocook:
+            return {"uuid": uuid, "variant": variant, "result": "option_disabled"}
+        status = self._get_airfryer_status()
+        if status in _PROBE_ACTIVE_STATUSES:
+            return {
+                "uuid": uuid,
+                "variant": variant,
+                "result": "busy",
+                "before": self._autocook_snapshot(),
+            }
+        # Armed before the write, so a cook is caught even when the write's
+        # reply is lost.
+        self._cancel_autocook_probe()
+        self._autocook_probe_task = self._create_tracked_task(
+            self._autocook_probe_watchdog(stop_after_seconds, watch_seconds)
+        )
+        report = await self._fusion_autocook_write(
+            uuid, variant, amount, doneness, start_after
+        )
+        report["stop_after_seconds"] = stop_after_seconds
+        _LOGGER.info("AutoCook probe result: %s", report)
+        return report
+
+    def _cancel_autocook_probe(self) -> None:
+        """Cancel a probe watchdog that is still waiting."""
+        task = self._autocook_probe_task
+        if task is not None and not task.done():
+            task.cancel()
+        self._autocook_probe_task = None
+
+    async def _autocook_probe_watchdog(
+        self, stop_after_seconds: float, watch_seconds: float
+    ) -> None:
+        """Stop a cook that a probe set off, and log what the appliance did.
+
+        Watches for watch_seconds for the appliance to start. Once it is
+        active the stop follows stop_after_seconds later through the regular
+        Stop (pause then mainmenu on a Venus), never power off: a Venus
+        acknowledges standby mid-cook and carries on cooking.
+        """
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        active_since: float | None = None
+        last: dict[str, Any] | None = None
+        while True:
+            now = loop.time()
+            snapshot = self._autocook_snapshot()
+            if snapshot != last:
+                _LOGGER.info("AutoCook probe +%.1fs: %s", now - start, snapshot)
+                last = snapshot
+            status = snapshot["status"]
+            if active_since is None and status in _PROBE_ACTIVE_STATUSES:
+                active_since = now
+                _LOGGER.warning(
+                    "AutoCook probe: appliance is %s, stopping it in %ss",
+                    status,
+                    stop_after_seconds,
+                )
+            if active_since is not None and now - active_since >= stop_after_seconds:
+                if status in (AIRFRYER_STATUS_MAINMENU, AIRFRYER_STATUS_STANDBY):
+                    _LOGGER.info("AutoCook probe: appliance already stopped")
+                    return
+                _LOGGER.warning("AutoCook probe: stopping the cook it started")
+                stopped = await self.async_airfryer_stop()
+                _LOGGER.warning(
+                    "AutoCook probe: stop %s, %s",
+                    "accepted" if stopped else "REFUSED",
+                    self._autocook_snapshot(),
+                )
+                return
+            if active_since is None and now - start >= watch_seconds:
+                _LOGGER.info(
+                    "AutoCook probe: no cook within %ss, last %s",
+                    watch_seconds,
+                    snapshot,
+                )
+                return
+            await asyncio.sleep(_PROBE_POLL_INTERVAL)
 
     async def async_airfryer_set_settings(
         self,
