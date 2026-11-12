@@ -72,6 +72,10 @@ _NCP_PORT_MAP: dict[str, str] = {
     "recipe_s": "recipe",
     # Venus auto cook (APK VenusAutoCookStatusPortKt)
     "acp_s": "autocook",
+    # Venus auto cook write port, advertised next to acp_s by an HD9880 on
+    # FUSION (issue #14). Its property schema is not APK-verified; it is only
+    # written by the experimental FUSION AutoCook start (see the coordinator).
+    "acp_c": "autocook_control",
     # Espresso ports (from APK espresso/PortsKt.java)
     "machinestatus": "machinestatus",
     "command": "command",
@@ -213,6 +217,11 @@ class PhilipsMQTTClient:
     control topics for state updates and command responses.
     """
 
+    # Last port lists logged at INFO, so a debug-less log still names the
+    # ports once without repeating them on every rediscovery. A class default
+    # so a client built without __init__ (as the tests do) has it too.
+    _logged_ports: tuple[tuple[str, ...], tuple[str, ...]] | None = None
+
     def __init__(
         self,
         device: FusionDeviceInfo,
@@ -248,6 +257,7 @@ class PhilipsMQTTClient:
         self._lock = threading.Lock()
         self._discovered_ports: list[str] = []  # NCP read port names from getAllPorts
         self._discovered_write_ports: list[str] = []  # NCP write port names
+        self._logged_ports = None
         # NCP read ports the device has replied about, and the subset that
         # actually reported. The answers arrive one message at a time, so
         # these are what tell a caller the state is whole rather than merely
@@ -373,6 +383,15 @@ class PhilipsMQTTClient:
         """
         control_ports = {"venusaf_c", "Control"}
         return bool(control_ports & set(self._discovered_write_ports))
+
+    @property
+    def discovered_write_ports(self) -> list[str]:
+        """Return the NCP write ports named by the last getAllPorts."""
+        return list(self._discovered_write_ports)
+
+    def has_write_port(self, ncp_port: str) -> bool:
+        """Return True if the device advertised this NCP write port."""
+        return ncp_port in self._discovered_write_ports
 
     def wake_airfryer(self) -> None:
         """Wake a FUSION airfryer from standby by setting shadow powerOn.
@@ -899,6 +918,23 @@ class PhilipsMQTTClient:
         answered busy is sent again, as the app does, and busy is returned
         only once the retries run out. Blocks, so it runs in an executor.
         """
+        accepted, status, name, _reply = self.send_port_command_and_wait_reply(
+            port_name, command_name, properties, timeout
+        )
+        return accepted, status, name
+
+    def send_port_command_and_wait_reply(
+        self,
+        port_name: str,
+        command_name: str = "setPort",
+        properties: dict[str, Any] | None = None,
+        timeout: float = 10.0,
+    ) -> tuple[bool, int | None, str, dict[str, Any] | None]:
+        """Send a port command, wait for it, and also return the raw reply.
+
+        As send_port_command_and_wait, plus the appliance's whole reply
+        message (None without one), for callers that need to log it.
+        """
         retries = 0
         while True:
             result = self._send_and_wait(port_name, command_name, properties, timeout)
@@ -921,7 +957,7 @@ class PhilipsMQTTClient:
         command_name: str,
         properties: dict[str, Any] | None,
         timeout: float,
-    ) -> tuple[bool, int | None, str]:
+    ) -> tuple[bool, int | None, str, dict[str, Any] | None]:
         """Send a port command once and wait for its reply.
 
         The cid is registered before the publish, so a reply cannot arrive
@@ -934,16 +970,17 @@ class PhilipsMQTTClient:
             self._pending_writes[cid] = (event, result)
         try:
             if self.send_port_command(port_name, command_name, properties, cid) is None:
-                return False, None, "not_connected"
+                return False, None, "not_connected", None
             if not event.wait(timeout):
-                return False, None, "timeout"
+                return False, None, "timeout", None
         finally:
             with self._lock:
                 self._pending_writes.pop(cid, None)
         status = result.get("status")
+        reply = result.get("payload")
         if not isinstance(status, int):
-            return False, None, str(status)
-        return status == 0, status, _NCP_STATUS_NAMES.get(status, "unknown")
+            return False, None, str(status), reply
+        return status == 0, status, _NCP_STATUS_NAMES.get(status, "unknown"), reply
 
     def _on_connect(
         self,
@@ -1159,6 +1196,7 @@ class PhilipsMQTTClient:
             if pending is not None:
                 event, result = pending
                 result["status"] = status
+                result["payload"] = payload
                 event.set()
 
         # Handle getAllPorts response: send getPort for each discovered port
@@ -1182,6 +1220,17 @@ class PhilipsMQTTClient:
                         _LOGGER.debug("Discovered NCP write port: %s", pname)
                 self._discovered_ports = read_ports
                 self._discovered_write_ports = write_ports
+                # Once at INFO, so a user's log answers which ports this
+                # appliance has (e.g. whether it offers acp_c) without debug.
+                logged = (tuple(read_ports), tuple(write_ports))
+                if logged != self._logged_ports:
+                    self._logged_ports = logged
+                    _LOGGER.info(
+                        "NCP getAllPorts for %s: read=%s write=%s",
+                        self._device.model_name,
+                        read_ports,
+                        write_ports,
+                    )
                 # A fresh discovery re-asks every port, so nothing has
                 # replied this round yet.
                 with self._lock:
