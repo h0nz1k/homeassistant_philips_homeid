@@ -6,14 +6,14 @@
   "dependencies": [],
   "documentation": "https://github.com/renaudallard/homeassistant_philips_homeid",
   "iot_class": "local_polling",
-  "issue_tracker": "https://github.com/renaudallard/homeassistant_philips_homeid/issues",
+  "issue_tracker": "https://github.com/h0nz1k/homeassistant_philips_homeid/issues",
   "requirements": [],
   "ssdp": [
     {
       "st": "urn:philips-com:device:DiProduct:1"
     }
   ],
-  "version": "3.9.15",
+  "version": "3.9.15-h0nz1k.1",
   "zeroconf": [
     {
       "type": "_philipscondor._tcp.local."

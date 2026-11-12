@@ -1,5 +1,5 @@
 {
-  "name": "Philips HomeID",
+  "name": "Philips HomeID (h0nz1k fork)",
   "content_in_root": false,
   "render_readme": true,
   "homeassistant": "2025.3.0",
